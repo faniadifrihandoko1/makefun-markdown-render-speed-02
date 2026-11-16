@@ -188,6 +188,47 @@ function suppressLabelDelims(nodes, bi) {
     if (nd.k === 'd') nodes[j] = { k: 't', s: nd.c.repeat(nd.n) };
   }
 }
+// Does this node (or any descendant) hold a code span? A code span
+// that ends up inside a link's children still counts as the boundary
+// for the poisoned-link suppression.
+function containsCodeSpan(node) {
+  if (node.k === 'c') return true;
+  if (node.ch) for (const ch of node.ch) if (containsCodeSpan(ch)) return true;
+  return false;
+}
+// A link whose label contains a code span with mismatched backtick runs
+// (opening run length != closing run length) where one run is a single
+// backtick "poisons" the rest of the paragraph: marked's inline lexer
+// masks a code span from the dangling single backtick to the next code
+// span, so emphasis pairs between the link and that code span do not
+// form. (Matched runs, and mismatches where both runs are >= 2, do not
+// poison: [x ``small```](...) and [x ```small``](...) form emphasis
+// normally. A run pairs with the NEXT run of the same length, so
+// [less `` a ` b ``](...) is a valid code span, not a mismatch.)
+// Returns true when the label has such a mismatch.
+function labelHasPoisonedBackticks(src, start, end) {
+  const runs = [];
+  let q = start;
+  while (q < end) {
+    if (src[q] === '`') {
+      let len = 0;
+      while (q + len < end && src[q + len] === '`') len++;
+      runs.push(len);
+      q += len;
+    } else q++;
+  }
+  for (let i = 0; i < runs.length; i++) {
+    // find the next run of the same length: a valid code span
+    let j = i + 1;
+    while (j < runs.length && runs[j] !== runs[i]) j++;
+    if (j < runs.length) { i = j; continue; } // valid span, skip past it
+    // no matching closer: dangling opener; the next run (if any) is the
+    // would-be closer. Poisoned only when the two runs differ and one
+    // of them is a single backtick.
+    if (i + 1 < runs.length && runs[i] !== runs[i + 1] && (runs[i] === 1 || runs[i + 1] === 1)) return true;
+  }
+  return false;
+}
 function labelReachesBracket(src, q, p) {
   while (q < p) {
     const c = src[q];
@@ -801,7 +842,9 @@ function parseInline(src, refs) {
           nodes.push({ k: 'img', href: link.dest, title: link.title, altRaw });
         } else {
           stripExtAutolinks(kids);
-          nodes.push({ k: 'link', href: link.dest, title: link.title, ch: kids });
+          const lnk = { k: 'link', href: link.dest, title: link.title, ch: kids };
+          if (labelHasPoisonedBackticks(src, opener.pos + 1, i)) lnk.poison = true;
+          nodes.push(lnk);
         }
         // also deactivate any other openers that were inside? (done above)
         i = end; continue;
@@ -869,6 +912,22 @@ function parseInline(src, refs) {
     if (nodes[k].k === 'br' && nodes[k + 1].k === 't') {
       nodes[k + 1].s = nodes[k + 1].s.replace(/^[ \t]+/, '');
       if (nodes[k + 1].s === '') nodes.splice(k + 1, 1);
+    }
+  }
+  // A link whose label has a mismatched code span with a single
+  // backtick poisons emphasis until the last code span in the
+  // paragraph: literalize delimiter nodes between such a link and the
+  // last code span after it. (No code span after the link means no
+  // suppression at all.)
+  for (let k = 0; k < nodes.length; k++) {
+    const nd = nodes[k];
+    if (nd.k === 'link' && nd.poison) {
+      let cIdx = -1;
+      for (let m = k + 1; m < nodes.length; m++) { if (containsCodeSpan(nodes[m])) cIdx = m; }
+      if (cIdx < 0) continue;
+      for (let m = k + 1; m < cIdx; m++) {
+        if (nodes[m].k === 'd') nodes[m] = { k: 't', s: nodes[m].c.repeat(nodes[m].n) };
+      }
     }
   }
   processEmphasis(nodes);
