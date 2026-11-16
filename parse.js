@@ -553,13 +553,19 @@ function trimExtEnd(s) {
   while (prev !== cur) { prev = cur; const m = re.exec(cur); cur = m ? m[0] : ''; }
   return cur;
 }
+// extended-autolink patterns as sticky regexes (anchored at lastIndex,
+// so tryExtAutolink never slices the rest of the string per call)
+const EXT_URL_RE = /(?:https?:\/\/|ftp:\/\/)(?:[A-Za-z0-9-]+\.?)+[^\s<]*/iy;
+const EXT_WWW_RE = /www\.(?:[A-Za-z0-9-]+\.?)+[^\s<]*/y;
+const EXT_EMAIL_RE = /(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:)?[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?)+/y;
 function tryExtAutolink(s, i, nodes, linkForms) {
   const prev = i > 0 ? s[i - 1] : '';
   if (prev !== '' && (isAlnum(prev) || prev === '/' || prev === '.')) return null;
   // scheme:// (case-insensitive) or www. (lowercase only); marked's
   // url regex takes [^\s<]* then trims with _backpedal (no dot required)
-  let m = s.slice(i).match(/^(?:https?:\/\/|ftp:\/\/)(?:[A-Za-z0-9-]+\.?)+[^\s<]*/i)
-    || s.slice(i).match(/^www\.(?:[A-Za-z0-9-]+\.?)+[^\s<]*/);
+  let m = null;
+  EXT_URL_RE.lastIndex = i; m = EXT_URL_RE.exec(s);
+  if (!m) { EXT_WWW_RE.lastIndex = i; m = EXT_WWW_RE.exec(s); }
   if (m) {
     let raw = m[0];
     // truncate at a ']' that actually closes an enclosing bracket link
@@ -578,7 +584,8 @@ function tryExtAutolink(s, i, nodes, linkForms) {
   }
   // email (possibly with scheme like mailto: / xmpp:); domain labels
   // may contain '_' inside (foo@bar.baz_b links) but not at the end
-  const em = s.slice(i).match(/^(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:)?[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9])?)+/);
+  EXT_EMAIL_RE.lastIndex = i;
+  const em = EXT_EMAIL_RE.exec(s);
   if (em) {
     let url = trimExtEnd(em[0]);
     // include a single-segment /path for scheme emails (xmpp:foo@bar/txt),
