@@ -177,6 +177,17 @@ function containsLink(nodes) {
 // label, a code span is a backtick run + non-backtick content + a
 // backtick run (closing run not followed by a backtick); backticks
 // immediately before ']' are literal.
+// When an inline link/image [label](...) fails to form, marked does not
+// let emphasis/strikethrough delimiters inside that label form either
+// ([at _node foo_](foo bar) stays literal, while [at _node foo_][x]
+// and [at _node foo_] do form emphasis). Literalize the delimiter
+// nodes after the opener so the emphasis pass never sees them.
+function suppressLabelDelims(nodes, bi) {
+  for (let j = bi + 1; j < nodes.length; j++) {
+    const nd = nodes[j];
+    if (nd.k === 'd') nodes[j] = { k: 't', s: nd.c.repeat(nd.n) };
+  }
+}
 function labelReachesBracket(src, q, p) {
   while (q < p) {
     const c = src[q];
@@ -731,6 +742,8 @@ function parseInline(src, refs) {
       // backtick (or other invalid label content) means no link forms
       // ([foo ` bar](...) stays literal, [at `a ` b`](...) likewise)
       if (!labelReachesBracket(src, opener.pos + 1, i)) {
+        // a failed inline link also suppresses emphasis in its label
+        if (src[i + 1] === '(') suppressLabelDelims(nodes, bi);
         opener.active = false;
         nodes.splice(bi, 0, { k: 't', s: opener.img ? '![' : '[' });
         nodes.splice(bi + 1, 1);
@@ -787,6 +800,8 @@ function parseInline(src, refs) {
         i = end; continue;
       }
       // no link: opener stays literal; mark it inactive so it cannot pair later
+      // a failed inline link also suppresses emphasis in its label
+      if (after === '(') suppressLabelDelims(nodes, bi);
       opener.active = false;
       nodes.splice(bi, 0, { k: 't', s: opener.img ? '![' : '[' });
       // remove the bracket node itself (now at bi+1)
