@@ -182,18 +182,21 @@ function labelReachesBracket(src, q, p) {
     const c = src[q];
     if (c === '`') {
       let r1 = 0; while (q + r1 < src.length && src[q + r1] === '`') r1++;
-      // code span alternative first: run + non-backtick content + run
+      // code span: opening run + non-backtick content + a closing run
+      // of ANY length (marked's label regex does not require equal
+      // runs: ``fixes` is a valid span in a label). Only a backtick
+      // before ']' can close it — a closer past ']' does not count.
       let k = q + r1;
-      while (k < src.length && src[k] !== '`') k++;
-      if (k < src.length) {
+      while (k < p && src[k] !== '`') k++;
+      if (k < p) {
         let r2 = 0; while (k + r2 < src.length && src[k + r2] === '`') r2++;
-        if (src[k + r2] !== '`') {
-          if (p < k + r2) return false; // p is inside this code span
-          q = k + r2; continue;
-        }
+        q = k + r2; continue;
       }
-      // backticks immediately before ']' are literal in a label
-      if (src[q + r1] === ']') { q += r1; continue; }
+      // no closing run within the label: backticks before ']' are
+      // literal only when there are two or more of them; a single
+      // unclosed backtick is a code-span opener with no closer, so
+      // the label fails ([foo `] and [foo ` bar] form no link)
+      if (src[q + r1] === ']' && r1 >= 2) { q += r1; continue; }
       return false;
     }
     if (c === '\\' && q + 1 < src.length) { q += 2; continue; }
@@ -724,6 +727,15 @@ function parseInline(src, refs) {
       if (bi < 0) { pushText(']'); i++; continue; }
       const opener = nodes[bi];
       const children = nodes.slice(bi + 1);
+      // the label must match marked's label pattern: an unclosed
+      // backtick (or other invalid label content) means no link forms
+      // ([foo ` bar](...) stays literal, [at `a ` b`](...) likewise)
+      if (!labelReachesBracket(src, opener.pos + 1, i)) {
+        opener.active = false;
+        nodes.splice(bi, 0, { k: 't', s: opener.img ? '![' : '[' });
+        nodes.splice(bi + 1, 1);
+        pushText(']'); i++; continue;
+      }
       let link = null, end = i + 1;
       const after = src[i + 1];
       if (after === '(') {
@@ -1269,11 +1281,11 @@ function parseBlocks(lines, term, refs, depth = 0, nb = null, inItem = false) {
           let k = idx2, cnt = 0; while (k < l.length && l[k] === fence.ch) { cnt++; k++; }
           if (cnt >= fence.len && trimLine(l.slice(k)) === '') { closed = true; break; }
         }
-        // fenced code: up to fence.indent columns are removed; a tab
-        // that straddles the indent boundary is removed whole (marked
-        // gives 'indented', not ' indented', for a tab under a 3-space
-        // fence) — unlike stripCols, which replaces it with spaces
-        content.push(stripFenceIndent(l, fence.indent));
+        // fenced code: backtick fences strip up to fence.indent columns
+        // from each content line (a tab straddling the boundary is
+        // removed whole); TILDE fences do NOT dedent at all — marked
+        // keeps the full indent on every content line of a ~~~ fence
+        content.push(fence.ch === '~' ? l : stripFenceIndent(l, fence.indent));
         j++;
       }
       // marked's fences regex captures the content as the lines joined
