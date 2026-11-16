@@ -531,36 +531,35 @@ function tryHtmlTag(s, i) {
   return null;
 }
 function trimExtEnd(s) {
-  // trim trailing punctuation / unbalanced ')' / entity-like tail for ext autolinks
-  let end = s.length;
-  while (end > 0) {
-    const c = s[end - 1];
-    if (c === '?' || c === '!' || c === '.' || c === ',' || c === ':' || c === ';' || c === '*' || c === '_' || c === '~' || c === "'") { end--; continue; }
-    if (c === ')') {
-      let open = 0, close = 0;
-      for (let k = 0; k < end; k++) { if (s[k] === '(') open++; else if (s[k] === ')') close++; }
-      if (close > open) { end--; continue; }
-    }
-    break;
-  }
-  return s.slice(0, end);
+  // marked's _backpedal, applied until stable: keeps runs of
+  // non-punctuation, balanced (...) groups, and punctuation that is
+  // NOT at the end (so ')]' is kept when more URL follows it)
+  const re = /^(?:[^?!.,:;*_'\"~()&]+|\([^)]*\)|&(?![a-zA-Z0-9]+;$)|[?!.,:;*_'\"~)]+(?!$))+/;
+  let prev = null, cur = s;
+  while (prev !== cur) { prev = cur; const m = re.exec(cur); cur = m ? m[0] : ''; }
+  return cur;
 }
-function tryExtAutolink(s, i, nodes) {
+function tryExtAutolink(s, i, nodes, linkForms) {
   const prev = i > 0 ? s[i - 1] : '';
   if (prev !== '' && (isAlnum(prev) || prev === '/' || prev === '.')) return null;
-  // scheme:// (case-insensitive) or www. (lowercase only)
-  let m = s.slice(i).match(/^(?:https?:\/\/|ftp:\/\/)[^\s<>\[\]{}"']+/i)
-    || s.slice(i).match(/^www\.[^\s<>\[\]{}"']+/);
+  // scheme:// (case-insensitive) or www. (lowercase only); marked's
+  // url regex takes [^\s<]* then trims with _backpedal (no dot required)
+  let m = s.slice(i).match(/^(?:https?:\/\/|ftp:\/\/)(?:[A-Za-z0-9-]+\.?)+[^\s<]*/i)
+    || s.slice(i).match(/^www\.(?:[A-Za-z0-9-]+\.?)+[^\s<]*/);
   if (m) {
-    let url = m[0];
-    // stop before an entity-like &word;
-    const amp = url.search(/&[A-Za-z0-9]+;/);
-    if (amp >= 0) url = url.slice(0, amp);
-    url = trimExtEnd(url);
+    let url = trimExtEnd(m[0]);
     if (url.length < 5) return null;
-    // domain must contain a dot after www. / scheme
-    const afterScheme = url.replace(/^(?:https?:\/\/|ftp:\/\/|www\.)/i, '');
-    if (afterScheme.indexOf('.') < 0) return null;
+    // the autolink must not swallow a ']' that actually closes an
+    // enclosing bracket link (marked's link tokenizer runs first, so
+    // '[text www.u](dest)' keeps the bracket link); a ']' that closes
+    // nothing (the label already contains a link) stays in the url
+    if (linkForms) {
+      for (let q = 0; q < url.length; q++) {
+        if (url[q] === ']' && linkForms(i + q)) { url = url.slice(0, q); break; }
+      }
+      if (url.endsWith(']') && linkForms(i + url.length - 1)) url = url.slice(0, -1);
+    }
+    if (url.length < 5) return null;
     const href = /^www\./.test(url) ? 'http://' + url : url;
     return { href, text: url, end: i + url.length };
   }
@@ -596,6 +595,10 @@ function tryExtAutolink(s, i, nodes) {
   return null;
 }
 
+// marked's lexer state: an '<a ' tag (startATag /^<a /i) sets inLink,
+// '</a>' (endATag) clears it; while set, extended autolinks do not form
+let inLink = false;
+
 function parseInline(src, refs) {
   // marked's url (extended autolink) tokenizer is skipped inside a link's
   // text, but <...> autolinks still form there: when a bracket-formed
@@ -626,6 +629,11 @@ function parseInline(src, refs) {
     for (let j = nodes.length - 1; j >= 0; j--) { if (nodes[j].k === 'b' && nodes[j].active) { bi = j; break; } }
     if (bi < 0) return false;
     if (nodes[bi].img) return false; // images may contain links
+    // a link may not contain another link: if the text between the
+    // opener and this ']' already has one, this ']' closes nothing
+    const kids = nodes.slice(bi + 1);
+    if (text) kids.push({ k: 't', s: text });
+    if (containsLink(kids)) return false;
     // the ']' must be a real link-closing bracket per the label pattern
     if (!labelReachesBracket(src, nodes[bi].pos + 1, p)) return false;
     const labelSoFar = () => normalizeLabel(plainText(nodes.slice(bi + 1)) + text + src.slice(i, p));
@@ -690,7 +698,12 @@ function parseInline(src, refs) {
         i = al.end; continue;
       }
       const tag = tryHtmlTag(src, i);
-      if (tag) { flushText(); nodes.push({ k: 'h', s: tag }); i += tag.length; continue; }
+      if (tag) {
+        flushText();
+        if (!inLink && /^<a /i.test(tag)) inLink = true;
+        else if (inLink && /^<\/a>/i.test(tag)) inLink = false;
+        nodes.push({ k: 'h', s: tag }); i += tag.length; continue;
+      }
       pushText('<'); i++; continue;
     }
     if (c === '&') {
@@ -790,9 +803,9 @@ function parseInline(src, refs) {
       }
       i = j; continue;
     }
-    // extended autolinks
-    if (c === 'w' || c === 'h' || c === 'f' || isAlnum(c)) {
-      const ea = tryExtAutolink(src, i, nodes);
+    // extended autolinks (suppressed while inside an '<a ' tag's span)
+    if (!inLink && (c === 'w' || c === 'h' || c === 'f' || isAlnum(c))) {
+      const ea = tryExtAutolink(src, i, nodes, linkFormsAtBracket);
       if (ea) {
         flushText();
         nodes.push({ k: 'link', href: ea.href, title: null, auto: 'ext', ch: [{ k: 't', s: ea.text }] });
@@ -1439,6 +1452,9 @@ function renderBlocks(nodes, refs, tight) {
   return out;
 }
 export function parse(markdown) {
+  // marked's lexer state.inLink persists across the whole document:
+  // an unclosed '<a ' tag suppresses every later extended autolink
+  inLink = false;
   const src = String(markdown).replace(/\r\n?/g, '\n');
   const lines = src.split('\n');
   let term;
