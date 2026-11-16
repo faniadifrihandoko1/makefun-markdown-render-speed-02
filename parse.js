@@ -1212,7 +1212,11 @@ function tryList(lines, term, i, refs, depth = 0, nb = null) {
           break;
         }
         const ninf = k2 < lines.length ? listMarkerInfo(lines[k2]) : null;
-        if (ninf && ninf.ordered === info.ordered && ninf.delim === info.delim && ninf.indent < prevContentIndent) { blankBeforeNextItem = true; trailingBlanks += k - j; j = k; break; }
+        // a following same-list item must sit below THIS item's content
+        // indent (not the previous item's: item 1 '1.  ' has indent 4
+        // while item 2 '2. ' has 3, so a 3-space '306610.' line after a
+        // blank is nested inside item 2, not a sibling of item 1)
+        if (ninf && ninf.ordered === info.ordered && ninf.delim === info.delim && ninf.indent < ci.contentIndent) { blankBeforeNextItem = true; trailingBlanks += k - j; j = k; break; }
         // an item with no content yet ends at a blank line
         const hasContent = itemLines.some(l => !isBlank(l));
         if (!hasContent) { trailingBlanks += k - j; j = k; break; }
