@@ -1536,14 +1536,22 @@ function innerLine(line) {
 }
 function canLazy(sub) {
   if (sub.length === 0) return false;
-  let inFence = null;
+  let inFence = null, fenceDepth = 0;
   for (const l of sub) {
+    // quote depth of this sub-line (leading '>' markers)
+    let d = 0, s = l;
+    while (isQuoteLine(s)) { d++; s = stripQuoteLine(s); }
+    // a fence opened inside a nested quote closes when that quote
+    // ends (a later line with fewer '>' markers), even though no
+    // closing fence line appears (doc-21: the ```rust fence inside
+    // '> >' ends at '> request ...', so 'fast npm more' is lazy)
+    if (inFence && d < fenceDepth) inFence = null;
     const il = innerLine(l);
     if (isBlank(il)) continue;
     const f = tryFence(il);
     if (f) {
       if (inFence && f.ch === inFence.ch && f.len >= inFence.len) inFence = null;
-      else if (!inFence) inFence = f;
+      else if (!inFence) { inFence = f; fenceDepth = d; }
     }
   }
   if (inFence) return false;
