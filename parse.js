@@ -1111,6 +1111,13 @@ function isBlockStart(line) {
   const h = htmlBlockType(line, true);
   return !!(tryAtx(line) || tryFence(line) || tryThematic(line) || isQuoteLine(line) || listMarkerInfo(line) || (h >= 1 && h <= 6));
 }
+// a block start that a lazy continuation line cannot follow: a quote
+// line CAN be lazily continued (the line goes into the quote's
+// paragraph), but a fence opener / heading / list / HTML block cannot
+function isNonLazyBlockStart(line) {
+  const h = htmlBlockType(line, true);
+  return !!(tryAtx(line) || tryFence(line) || tryThematic(line) || listMarkerInfo(line) || (h >= 1 && h <= 6));
+}
 function tryList(lines, term, i, refs, depth = 0, nb = null) {
   const info = listMarkerInfo(lines[i]);
   if (!info) return null;
@@ -1168,8 +1175,11 @@ function tryList(lines, term, i, refs, depth = 0, nb = null) {
       if (col >= ci.contentIndent) { itemLines.push(stripCols(el, ci.contentIndent)); itemTerm.push(term[j]); itemNb.push(nb && nb[j] ? true : false); trailingBlanks = 0; j++; continue; }
       // lazy continuation: previous item line non-blank, and the line does
       // not start a new block; append it to the previous item line so it
-      // stays paragraph text, stripping up to the content indent
-      if (itemLines.length > 0 && !isBlank(itemLines[itemLines.length - 1]) && !isBlockStart(el)) {
+      // stays paragraph text, stripping up to the content indent.
+      // It must only continue a paragraph: if the previous line itself
+      // starts a block (e.g. a fence opener) the line is not part of
+      // the item at all (doc-17: '```toml' must not swallow the next line)
+      if (itemLines.length > 0 && !isBlank(itemLines[itemLines.length - 1]) && !isNonLazyBlockStart(itemLines[itemLines.length - 1]) && !isBlockStart(el)) {
         itemLines[itemLines.length - 1] += '\n' + (col >= ci.contentIndent ? stripCols(el, ci.contentIndent) : stripCols(el, Math.min(col, ci.contentIndent)));
         itemTerm[itemTerm.length - 1] = term[j]; trailingBlanks = 0; j++; continue;
       }
@@ -1237,13 +1247,10 @@ function parseBlocks(lines, term, refs, depth = 0, nb = null, inItem = false) {
         content.push(stripCols(l, fence.indent));
         j++;
       }
-      let text = content.join('\n');
-      if (content.length > 0) {
-        const lastIdx = closed ? j - 1 : lines.length - 1;
-        if (term[lastIdx]) text += '\n';
-      }
-      // a fenced code block's text never ends with two newlines
-      if (text.endsWith('\n\n')) text = text.slice(0, -1);
+      // marked's fences regex captures the content as the lines joined
+      // by '\n' (no trailing terminator); the renderer strips one
+      // trailing '\n' and adds one back (empty stays empty)
+      const text = content.join('\n');
       nodes.push({ t: 'code', lang: fence.info === '' ? null : (fence.info.search(/[ \t]/) < 0 ? fence.info : fence.info.slice(0, fence.info.search(/[ \t]/))), text });
       i = closed ? j + 1 : j;
       continue;
@@ -1385,7 +1392,8 @@ function renderBlocks(nodes, refs, tight) {
     } else if (n.t === 'hr') {
       out += '<hr>\n';
     } else if (n.t === 'code') {
-      out += '<pre><code' + (n.lang ? ' class="language-' + escAttr(unescapeStr(n.lang)) + '"' : '') + '>' + escAll(n.text) + '</code></pre>\n';
+      const r = n.text ? n.text.replace(/\n$/, '') + '\n' : '';
+      out += '<pre><code' + (n.lang ? ' class="language-' + escAttr(unescapeStr(n.lang)) + '"' : '') + '>' + escAll(r) + '</code></pre>\n';
     } else if (n.t === 'html') {
       out += n.text;
     } else if (n.t === 'quote') {
