@@ -547,18 +547,17 @@ function tryExtAutolink(s, i, nodes, linkForms) {
   let m = s.slice(i).match(/^(?:https?:\/\/|ftp:\/\/)(?:[A-Za-z0-9-]+\.?)+[^\s<]*/i)
     || s.slice(i).match(/^www\.(?:[A-Za-z0-9-]+\.?)+[^\s<]*/);
   if (m) {
-    let url = trimExtEnd(m[0]);
-    if (url.length < 5) return null;
-    // the autolink must not swallow a ']' that actually closes an
-    // enclosing bracket link (marked's link tokenizer runs first, so
-    // '[text www.u](dest)' keeps the bracket link); a ']' that closes
-    // nothing (the label already contains a link) stays in the url
+    let raw = m[0];
+    // truncate at a ']' that actually closes an enclosing bracket link
+    // BEFORE the backpedal, so emphasis delimiters just before that
+    // ']' end up trailing and are trimmed (marked's link tokenizer
+    // runs first, so the url never crosses the link's text)
     if (linkForms) {
-      for (let q = 0; q < url.length; q++) {
-        if (url[q] === ']' && linkForms(i + q)) { url = url.slice(0, q); break; }
+      for (let q = 0; q < raw.length; q++) {
+        if (raw[q] === ']' && linkForms(i + q)) { raw = raw.slice(0, q); break; }
       }
-      if (url.endsWith(']') && linkForms(i + url.length - 1)) url = url.slice(0, -1);
     }
+    let url = trimExtEnd(raw);
     if (url.length < 5) return null;
     const href = /^www\./.test(url) ? 'http://' + url : url;
     return { href, text: url, end: i + url.length };
@@ -863,6 +862,16 @@ function stripCols(line, cols) {
   }
   return line.slice(idx);
 }
+function stripFenceIndent(line, cols) {
+  let col = 0, idx = 0;
+  while (idx < line.length && col < cols) {
+    const c = line[idx];
+    if (c === ' ') { col++; idx++; }
+    else if (c === '\t') { const adv = 4 - (col % 4); if (col + adv > cols) { idx++; break; } col += adv; idx++; }
+    else break;
+  }
+  return line.slice(idx);
+}
 function isBlank(line) { for (let i = 0; i < line.length; i++) { const c = line[i]; if (c !== ' ' && c !== '\t') return false; } return true; }
 function trimLine(s) { return s.replace(/^[ \t]+/, '').replace(/[ \t]+$/, ''); }
 function tryAtx(line) {
@@ -1048,6 +1057,7 @@ function tryTable(lines, i) {
     const t = trimLine(line);
     if (t.startsWith('>')) break;
     if (tryAtx(line) || tryFence(line) || tryThematic(line)) break;
+    if (listMarkerInfo(line)) break;
     if (htmlBlockType(line, true) === 1 || htmlBlockType(line, true) === 2 || htmlBlockType(line, true) === 6) break;
     let cells = splitTableRow(line);
     while (cells.length < aligns.length) cells.push('');
@@ -1188,12 +1198,14 @@ function tryList(lines, term, i, refs, depth = 0, nb = null) {
       if (col >= ci.contentIndent) { itemLines.push(stripCols(el, ci.contentIndent)); itemTerm.push(term[j]); itemNb.push(nb && nb[j] ? true : false); trailingBlanks = 0; j++; continue; }
       // lazy continuation: previous item line non-blank, and the line does
       // not start a new block; append it to the previous item line so it
-      // stays paragraph text, stripping up to the content indent.
+      // stays paragraph text. A lazy line keeps its leading spaces when
+      // indented < 4 columns, but 4+ columns of indent are stripped
+      // (the indented-code threshold): cm-291 strips 4, doc-22 keeps 3.
       // It must only continue a paragraph: if the previous line itself
       // starts a block (e.g. a fence opener) the line is not part of
       // the item at all (doc-17: '```toml' must not swallow the next line)
       if (itemLines.length > 0 && !isBlank(itemLines[itemLines.length - 1]) && !isNonLazyBlockStart(itemLines[itemLines.length - 1]) && !isBlockStart(el)) {
-        itemLines[itemLines.length - 1] += '\n' + (col >= ci.contentIndent ? stripCols(el, ci.contentIndent) : stripCols(el, Math.min(col, ci.contentIndent)));
+        itemLines[itemLines.length - 1] += '\n' + (col >= 4 ? stripCols(el, 4) : el);
         itemTerm[itemTerm.length - 1] = term[j]; trailingBlanks = 0; j++; continue;
       }
       break;
@@ -1257,7 +1269,11 @@ function parseBlocks(lines, term, refs, depth = 0, nb = null, inItem = false) {
           let k = idx2, cnt = 0; while (k < l.length && l[k] === fence.ch) { cnt++; k++; }
           if (cnt >= fence.len && trimLine(l.slice(k)) === '') { closed = true; break; }
         }
-        content.push(stripCols(l, fence.indent));
+        // fenced code: up to fence.indent columns are removed; a tab
+        // that straddles the indent boundary is removed whole (marked
+        // gives 'indented', not ' indented', for a tab under a 3-space
+        // fence) — unlike stripCols, which replaces it with spaces
+        content.push(stripFenceIndent(l, fence.indent));
         j++;
       }
       // marked's fences regex captures the content as the lines joined
@@ -1311,7 +1327,9 @@ function parseBlocks(lines, term, refs, depth = 0, nb = null, inItem = false) {
         }
       }
       let text = content.join('\n');
-      if (content.length > 0 && term[j - 1] && !endedAtBlank && depth === 0 && !(j < lines.length && lines[j] === '')) text += '\n';
+      // trailing newline unless followed by a blank line, or the block
+      // is the last thing in a sub-document (blockquote / list item)
+      if (content.length > 0 && term[j - 1] && !endedAtBlank && (depth === 0 || j < lines.length) && !(j < lines.length && lines[j] === '')) text += '\n';
       nodes.push({ t: 'html', text });
       i = j;
       continue;
